@@ -1,0 +1,19 @@
+# Swift build artifacts
+.build/
+.swiftpm/
+
+# macOS metadata
+.DS_Store
+
+# Local AI/editor settings
+.claude/settings.local.json
+
+# Local configuration and logs
+.env
+.env.*
+*.log
+
+# Xcode user-specific data
+xcuserdata/
+*.xcuserstate
+DerivedData/
