@@ -30,6 +30,16 @@ final class KeyEventTapManager {
         let correctedLength: Int
     }
 
+    /// One-shot diagnostic captured by the first real key after a correction.
+    /// This tells us whether the intended input source was still active when
+    /// the host editor began its next IME composition session.
+    private struct PostCorrectionProbe {
+        let completedAt: TimeInterval
+        let expectedLayout: Layout
+        let bundleIdentifier: String?
+        let pid: pid_t
+    }
+
     /// Continues the custom undo sequence after a correction was restored:
     /// one more Cmd+Z removes the restored original input, then further
     /// repeated Cmd+Z presses are swallowed so the host app's now-stale undo
@@ -49,6 +59,7 @@ final class KeyEventTapManager {
     private var lastFrontmostBundleID: String?
     private var lastCorrection: CorrectionRecord?
     private var customUndoContinuation: CustomUndoContinuation?
+    private var postCorrectionProbe: PostCorrectionProbe?
     /// Incremented whenever the cursor/focus/input context may have changed.
     /// An asynchronous decision only edits text if this still matches the
     /// value captured at its word boundary.
@@ -137,6 +148,10 @@ final class KeyEventTapManager {
         // keyboard event. Never let a slow decision made for the old cursor
         // delete text at the new one.
         if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            if let probe = postCorrectionProbe {
+                DebugLogger.log("post-correction probe cancelled by mouse expectedLayout=\(probe.expectedLayout) expectedBundle=\(probe.bundleIdentifier ?? "nil") expectedPid=\(probe.pid) source=\(InputSourceSwitcher.currentInputSourceID() ?? "nil")")
+                postCorrectionProbe = nil
+            }
             invalidateTextContext()
             lastFrontmostBundleID = nil
             return Unmanaged.passRetained(event)
@@ -149,6 +164,19 @@ final class KeyEventTapManager {
         guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
         let keyCode = RawKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        if let probe = postCorrectionProbe {
+            postCorrectionProbe = nil
+            let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - probe.completedAt) * 1_000)
+            let application = NSWorkspace.shared.frontmostApplication
+            DebugLogger.log(
+                "post-correction first key keyCode=\(keyCode) elapsedMs=\(elapsedMS) "
+                    + "expectedLayout=\(probe.expectedLayout) source=\(InputSourceSwitcher.currentInputSourceID() ?? "nil") "
+                    + "expectedBundle=\(probe.bundleIdentifier ?? "nil") actualBundle=\(application?.bundleIdentifier ?? "nil") "
+                    + "expectedPid=\(probe.pid) actualPid=\(application?.processIdentifier ?? 0) "
+                    + "shift=\(event.flags.contains(.maskShift)) command=\(event.flags.contains(.maskCommand)) "
+                    + "control=\(event.flags.contains(.maskControl)) option=\(event.flags.contains(.maskAlternate))"
+            )
+        }
         let isPlainUndo =
             keyCode == Self.undoKeyCode
             && event.flags.contains(.maskCommand)
@@ -316,8 +344,10 @@ final class KeyEventTapManager {
     /// trigger order, one at a time, so they never race each other.
     private func triggerDecision(for keys: [BufferedKey], boundaryKey: BufferedKey) {
         guard let currentLayout = InputSourceSwitcher.currentLayout(),
-              let triggeringPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+              let triggeringApplication = NSWorkspace.shared.frontmostApplication
         else { return }
+        let triggeringPID = triggeringApplication.processIdentifier
+        let triggeringBundleID = triggeringApplication.bundleIdentifier
         let mode = settings.llmCallMode
         let engine = decisionEngine
         let boundaryCharacter = WordBoundary.insertedCharacter(for: boundaryKey.keyCode, shift: boundaryKey.shift)
@@ -364,22 +394,23 @@ final class KeyEventTapManager {
                 let correctedText = decision.replacementText + boundaryCharacter + trailingText
 
                 let deletingCount = decision.activeDisplayText.count + 1 + trailingText.count
+                DebugLogger.log(
+                    "correction apply begin bundle=\(triggeringBundleID ?? "nil") pid=\(triggeringPID) "
+                        + "currentLayout=\(currentLayout) targetLayout=\(decision.targetLayout) "
+                        + "source=\(InputSourceSwitcher.currentInputSourceID() ?? "nil") deleting=\(deletingCount) "
+                        + "active={\(DebugLogger.textProfile(decision.activeDisplayText))} "
+                        + "replacement={\(DebugLogger.textProfile(decision.replacementText))} "
+                        + "boundary={\(DebugLogger.textProfile(boundaryCharacter))} "
+                        + "trailing={\(DebugLogger.textProfile(trailingText))}"
+                )
 
                 if currentLayout == .english, decision.targetLayout == .korean {
-                    // Keep ABC active while inserting the already-composed
-                    // Korean Unicode text, then switch to Korean for the
-                    // user's subsequent typing. In Safari Dock web apps,
-                    // changing the input source immediately before an AX
-                    // text mutation can leave the focused WebKit editor's
-                    // Korean composition context stale.
+                    // Insert already-composed Hangul while ABC is active so
+                    // a synthetic fallback cannot be reinterpreted by the
+                    // Korean IME as fresh composing input.
                     TextReplacer.replace(deletingCount: deletingCount, with: correctedText)
                     InputSourceSwitcher.switchTo(.korean)
                 } else {
-                    // When correcting Korean to English, leave the original
-                    // ordering intact. The active Korean composition engine
-                    // can otherwise intercept TextReplacer's synthetic
-                    // Unicode event by its raw virtual keycode (always 0)
-                    // instead of honoring its Unicode string payload.
                     InputSourceSwitcher.switchTo(decision.targetLayout)
                     TextReplacer.replace(deletingCount: deletingCount, with: correctedText)
                 }
@@ -390,7 +421,18 @@ final class KeyEventTapManager {
                     correctedLength: correctedText.count
                 )
                 self.customUndoContinuation = nil
-                DebugLogger.log("stored lastCorrection originalText=\(self.lastCorrection!.originalText) originalLayout=\(currentLayout) correctedLength=\(correctedText.count)")
+                self.postCorrectionProbe = PostCorrectionProbe(
+                    completedAt: ProcessInfo.processInfo.systemUptime,
+                    expectedLayout: decision.targetLayout,
+                    bundleIdentifier: triggeringBundleID,
+                    pid: triggeringPID
+                )
+                DebugLogger.log(
+                    "correction apply completed bundle=\(triggeringBundleID ?? "nil") pid=\(triggeringPID) "
+                        + "expectedLayout=\(decision.targetLayout) source=\(InputSourceSwitcher.currentInputSourceID() ?? "nil") "
+                        + "corrected={\(DebugLogger.textProfile(correctedText))} "
+                        + "original={\(DebugLogger.textProfile(self.lastCorrection!.originalText))}"
+                )
                 self.finishPendingCorrection()
             }
         }
@@ -406,7 +448,7 @@ final class KeyEventTapManager {
             await previousInChain.value
             guard let self else { return }
             await MainActor.run {
-                DebugLogger.log("reverting: deletingCount=\(record.correctedLength) originalText=\(record.originalText) originalLayout=\(record.originalLayout)")
+                DebugLogger.log("reverting deleting=\(record.correctedLength) original={\(DebugLogger.textProfile(record.originalText))} originalLayout=\(record.originalLayout)")
 
                 // Retype while ABC is active, then restore the input source.
                 // In the common Korean -> English correction case the

@@ -5,16 +5,22 @@ import Testing
 /// branching logic without touching Apple Intelligence/FoundationModels at
 /// all, per the plan's testability requirement.
 private final class FakeJudge: PlausibilityJudge {
-    private let verdictToReturn: PlausibilityVerdict
+    private var verdicts: [PlausibilityVerdict]
     private(set) var callCount = 0
+    private(set) var candidates: [(String, CandidateLanguage)] = []
 
     init(verdict: PlausibilityVerdict) {
-        self.verdictToReturn = verdict
+        self.verdicts = [verdict]
+    }
+
+    init(verdicts: [PlausibilityVerdict]) {
+        self.verdicts = verdicts
     }
 
     func judge(candidate: String, language: CandidateLanguage) async -> PlausibilityVerdict {
         callCount += 1
-        return verdictToReturn
+        candidates.append((candidate, language))
+        return verdicts.isEmpty ? .unavailable : verdicts.removeFirst()
     }
 }
 
@@ -60,17 +66,19 @@ struct DecisionEngineTests {
         #expect(judge.callCount == 0)
     }
 
-    @Test("dictionary-confirmed English candidate skips Tier 2 entirely, even in modelAssisted")
-    func dictionaryConfirmedEnglishSkipsModel() async {
+    @Test("modelAssisted checks the active layout before accepting an other-layout dictionary hit")
+    func modelAssistedChecksActiveBeforeOtherDictionaryHit() async {
         let buffer: [BufferedKey] = [
             BufferedKey(keyCode: 0x05, shift: false), // g -> ㅎ
             BufferedKey(keyCode: 0x04, shift: false), // h -> ㅗ
         ]
-        let judge = FakeJudge(verdict: .implausible) // would reject if consulted -- it must not be
+        let judge = FakeJudge(verdict: .implausible)
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(recognizedWords: ["gh"]), judge: judge)
         let decision = await engine.decide(buffer: buffer, currentLayout: .korean, mode: .modelAssisted)
         #expect(decision?.replacementText == "gh")
-        #expect(judge.callCount == 0)
+        #expect(judge.callCount == 1)
+        #expect(judge.candidates.first?.0 == "호")
+        #expect(judge.candidates.first?.1 == .korean)
     }
 
     @Test("dictionaryOnly never consults Tier 2 for an ambiguous (non-dictionary) candidate -- leaves it alone")
@@ -93,21 +101,32 @@ struct DecisionEngineTests {
 
     @Test("modelAssisted accepts an ambiguous candidate the model finds plausible")
     func modelAssistedAcceptsPlausibleAmbiguousCandidate() async {
-        let judge = FakeJudge(verdict: .plausible)
+        let judge = FakeJudge(verdicts: [.implausible, .plausible])
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
         let decision = await engine.decide(buffer: dkssudBuffer, currentLayout: .english, mode: .modelAssisted)
         #expect(decision?.replacementText == "안녕")
         #expect(decision?.targetLayout == .korean)
-        #expect(judge.callCount == 1)
+        #expect(judge.callCount == 2)
     }
 
-    @Test("modelAssisted rejects an ambiguous candidate the model finds implausible")
-    func modelAssistedRejectsImplausibleAmbiguousCandidate() async {
-        let judge = FakeJudge(verdict: .implausible)
+    @Test("modelAssisted preserves an ambiguous active-layout word the model finds plausible")
+    func modelAssistedPreservesPlausibleActiveCandidate() async {
+        let judge = FakeJudge(verdict: .plausible)
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
         let decision = await engine.decide(buffer: dkssudBuffer, currentLayout: .english, mode: .modelAssisted)
         #expect(decision == nil)
         #expect(judge.callCount == 1)
+        #expect(judge.candidates.first?.0 == "dkssud")
+        #expect(judge.candidates.first?.1 == .english)
+    }
+
+    @Test("modelAssisted rejects an ambiguous other-layout candidate the model finds implausible")
+    func modelAssistedRejectsImplausibleOtherCandidate() async {
+        let judge = FakeJudge(verdicts: [.implausible, .implausible])
+        let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
+        let decision = await engine.decide(buffer: dkssudBuffer, currentLayout: .english, mode: .modelAssisted)
+        #expect(decision == nil)
+        #expect(judge.callCount == 2)
     }
 
     @Test("modelAssisted: an ambiguous candidate from the reverse (Korean-active) direction still reaches the model")
@@ -119,21 +138,23 @@ struct DecisionEngineTests {
             BufferedKey(keyCode: 0x05, shift: false), // g -> ㅎ
             BufferedKey(keyCode: 0x04, shift: false), // h -> ㅗ
         ]
-        let judge = FakeJudge(verdict: .plausible)
+        let judge = FakeJudge(verdicts: [.implausible, .plausible])
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
         let decision = await engine.decide(buffer: buffer, currentLayout: .korean, mode: .modelAssisted)
         #expect(decision?.replacementText == "gh")
         #expect(decision?.targetLayout == .english)
-        #expect(judge.callCount == 1)
+        #expect(judge.callCount == 2)
     }
 
-    @Test("modelAssisted: no candidate text at all is still a no-op, model not called")
-    func modelAssistedNoCandidateIsNoOp() async {
+    @Test("modelAssisted checks the active layout before finding no other-layout candidate")
+    func modelAssistedChecksActiveBeforeNoOtherCandidate() async {
         let judge = FakeJudge(verdict: .plausible)
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
         let decision = await engine.decide(buffer: uncomposableBuffer, currentLayout: .english, mode: .modelAssisted)
         #expect(decision == nil)
-        #expect(judge.callCount == 0)
+        #expect(judge.callCount == 1)
+        #expect(judge.candidates.first?.0 == "dr")
+        #expect(judge.candidates.first?.1 == .english)
     }
 
     @Test("modelAssisted with the model unavailable does not correct an ambiguous candidate")
@@ -142,6 +163,15 @@ struct DecisionEngineTests {
         let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(), judge: judge)
         let decision = await engine.decide(buffer: dkssudBuffer, currentLayout: .english, mode: .modelAssisted)
         #expect(decision == nil)
+    }
+
+    @Test("modelAssisted still accepts an other-layout dictionary hit when the active model is unavailable")
+    func modelAssistedUnavailableActiveModelAllowsDictionaryHit() async {
+        let judge = FakeJudge(verdict: .unavailable)
+        let engine = DecisionEngine(dictionaryChecker: FakeDictionaryChecker(recognizedWords: ["안녕"]), judge: judge)
+        let decision = await engine.decide(buffer: dkssudBuffer, currentLayout: .english, mode: .modelAssisted)
+        #expect(decision?.replacementText == "안녕")
+        #expect(judge.callCount == 1)
     }
 
     @Test("modelAssisted with no judge configured does not correct an ambiguous candidate")

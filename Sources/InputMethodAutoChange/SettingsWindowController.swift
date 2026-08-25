@@ -255,21 +255,27 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    /// A checkbox for whether `DebugLogger` writes to its file, plus a
-    /// button that copies that file out to wherever the user picks --
+    /// A checkbox for whether `DebugLogger` writes to its file, plus buttons
+    /// that export or clear it --
     /// `log`/`log stream`/Console.app all proved unreliable for actually
     /// seeing this app's own messages, so this sidesteps them entirely.
     private func addDebugRows(to grid: NSGridView) {
         enableLogsCheckbox.target = self
         enableLogsCheckbox.action = #selector(enableLogsToggled)
-        addRow(to: grid, label: "Debug", content: enableLogsCheckbox)
-
         let exportButton = NSButton(title: "Export Logs…", target: self, action: #selector(exportLogs))
-        addRow(to: grid, label: nil, content: exportButton)
+        let clearButton = NSButton(title: "Clear Logs", target: self, action: #selector(clearLogs))
+        let controls = NSStackView(views: [enableLogsCheckbox, exportButton, clearButton])
+        controls.orientation = .horizontal
+        controls.spacing = 8
+        addRow(to: grid, label: "Debug", content: controls)
     }
 
     @objc private func enableLogsToggled() {
         settings.loggingEnabled = enableLogsCheckbox.state == .on
+    }
+
+    @objc private func clearLogs() {
+        DebugLogger.clear()
     }
 
     @objc private func exportLogs() {

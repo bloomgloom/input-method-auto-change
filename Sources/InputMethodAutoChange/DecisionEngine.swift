@@ -10,24 +10,17 @@ struct ReplacementDecision {
     let targetLayout: Layout
 }
 
-/// Ties Tier 1 (deterministic: Hangul composition validity plus a
-/// dictionary check in both directions) and Tier 2 (on-device model
-/// plausibility judgment) together behind a single strategy switch keyed on
-/// `LLMCallMode`:
-///   - A dictionary-confirmed candidate is accepted immediately and never
-///     consults Tier 2 at all, regardless of `LLMCallMode` — this is the fast
-///     path that keeps common, real words from paying on-device model
-///     latency (NSSpellChecker supports both Korean and English).
-///   - Anything else is merely *ambiguous*: structurally valid (Korean
-///     composed cleanly) or non-empty decodable text, but not a dictionary
-///     hit (a proper noun, slang, a new coinage...). What happens to it is
-///     exactly what `LLMCallMode` controls:
-///       - `.dictionaryOnly` (default): leave it alone, never consult Tier 2.
-///         Maximizes speed/predictability at the cost of only ever
-///         correcting dictionary words.
-///       - `.modelAssisted`: ask Tier 2 for an opinion; accept only if it
-///         comes back `.plausible` (an unavailable model or a negative
-///         verdict both mean "don't touch it").
+/// Checks the active layout before considering the other layout, so preserving
+/// plausible input always outranks finding a plausible reinterpretation:
+///   1. Active-layout dictionary hit: leave the word alone.
+///   2. In `.modelAssisted`, ask the model about an ambiguous active-layout
+///      word. If plausible, leave it alone.
+///   3. Other-layout dictionary hit: correct immediately.
+///   4. In `.modelAssisted`, ask the model about an ambiguous other-layout
+///      word and correct only if plausible.
+/// If the active-layout model is unavailable, only a deterministic dictionary
+/// hit in the other layout may cause a correction; an uncertain candidate is
+/// left alone.
 struct DecisionEngine {
     private let dictionaryChecker: DictionaryWordChecking
     private let judge: PlausibilityJudge?
@@ -62,15 +55,29 @@ struct DecisionEngine {
         }
         let activeDisplay = renderedText(for: activeChars, layout: currentLayout)
 
-        // Never touch text that's already a recognized real word in the
-        // layout it was actually typed in -- even if reinterpreting the same
-        // keystrokes under the other layout also happens to pass Tier 1 (e.g.
-        // Korean particles like "이"/"을"/"는"/"가" decode keystroke-for-
-        // keystroke into short strings like "dl" that a dictionary also
-        // accepts). Preserving already-valid input outranks catching a
-        // coincidental false-positive collision in the other direction.
-        if case .dictionaryConfirmed = tier1Outcome(activeChars, layout: currentLayout) {
+        let activeOutcome = tier1Outcome(activeChars, layout: currentLayout)
+
+        // Never touch text that's already recognized in the layout it was
+        // actually typed in. In model-assisted mode this protection also
+        // covers proper nouns, slang, and other plausible non-dictionary
+        // input before the opposite layout is considered.
+        if case .dictionaryConfirmed = activeOutcome {
             return nil
+        }
+
+        var activeModelWasUnavailable = false
+        if mode == .modelAssisted,
+           case .ambiguous(let activeText) = activeOutcome,
+           let judge {
+            let activeLanguage: CandidateLanguage = currentLayout == .korean ? .korean : .english
+            switch await judge.judge(candidate: activeText, language: activeLanguage) {
+            case .plausible:
+                return nil
+            case .implausible:
+                break
+            case .unavailable:
+                activeModelWasUnavailable = true
+            }
         }
 
         let candidateLanguage: CandidateLanguage = otherLayout == .korean ? .korean : .english
@@ -83,7 +90,10 @@ struct DecisionEngine {
             return ReplacementDecision(activeDisplayText: activeDisplay, replacementText: text, targetLayout: otherLayout)
 
         case .ambiguous(let text):
-            guard mode == .modelAssisted, let judge else { return nil }
+            guard mode == .modelAssisted,
+                  !activeModelWasUnavailable,
+                  let judge
+            else { return nil }
             guard case .plausible = await judge.judge(candidate: text, language: candidateLanguage) else { return nil }
             return ReplacementDecision(activeDisplayText: activeDisplay, replacementText: text, targetLayout: otherLayout)
         }

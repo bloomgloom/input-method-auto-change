@@ -1,17 +1,15 @@
 import Foundation
 
-/// What happens to a candidate that the dictionary (Tier 1) doesn't
-/// recognize as a real word -- a dictionary-confirmed candidate is *always*
-/// accepted immediately in either mode, without ever consulting Tier 2; this
-/// only controls the ambiguous (non-dictionary) case.
+/// How non-dictionary input is handled after the active layout has been
+/// checked first. Dictionary hits remain the deterministic fast path.
 enum LLMCallMode: String, CaseIterable {
     /// Default: leave ambiguous candidates alone. Never consults the
     /// on-device model -- fastest, but only ever corrects real dictionary
     /// words.
     case dictionaryOnly
-    /// Also asks the on-device model about ambiguous candidates (proper
-    /// nouns, slang, new coinages) and accepts them if it says they're
-    /// plausible. Slower, but covers more than dictionary words alone.
+    /// Asks the on-device model about the active-layout word first, preserving
+    /// it if plausible. Only after it is rejected does it consider the other
+    /// layout, whose ambiguous candidate must also be model-confirmed.
     case modelAssisted
 }
 

@@ -41,4 +41,37 @@ enum DebugLogger {
             }
         }
     }
+
+    static func clear() {
+        queue.sync { try? FileManager.default.removeItem(at: logFileURL) }
+    }
+
+    /// A privacy-preserving description that is still enough to distinguish
+    /// precomposed Hangul syllables from modern/compatibility jamo. Do not log
+    /// scalar values here: exported logs may be shared for diagnosis, and the
+    /// values would make the user's original text trivially recoverable.
+    static func textProfile(_ text: String) -> String {
+        var ascii = 0
+        var hangulSyllables = 0
+        var modernJamo = 0
+        var compatibilityJamo = 0
+        var other = 0
+
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x00...0x7F:
+                ascii += 1
+            case 0xAC00...0xD7A3:
+                hangulSyllables += 1
+            case 0x1100...0x11FF, 0xA960...0xA97F, 0xD7B0...0xD7FF:
+                modernJamo += 1
+            case 0x3130...0x318F:
+                compatibilityJamo += 1
+            default:
+                other += 1
+            }
+        }
+
+        return "graphemes=\(text.count) utf16=\(text.utf16.count) scalars=\(text.unicodeScalars.count) ascii=\(ascii) hangulSyllables=\(hangulSyllables) modernJamo=\(modernJamo) compatibilityJamo=\(compatibilityJamo) other=\(other)"
+    }
 }
