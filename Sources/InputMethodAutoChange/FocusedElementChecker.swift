@@ -5,10 +5,9 @@ import Foundation
 /// Determines whether the system's currently focused UI element is an
 /// editable text field, via the Accessibility API. This replaces a
 /// hardcoded per-app allowlist: instead of only acting in a fixed set of
-/// apps, the app acts wherever a real text field happens to be focused,
-/// which naturally excludes non-text contexts (Vim normal mode, terminal
-/// command lines, games using letter keys as controls) without needing to
-/// enumerate every app that should or shouldn't be included.
+/// apps, the app acts wherever a native text field happens to be focused.
+/// Web-backed fields are excluded because Accessibility replacement can
+/// desynchronize their DOM/IME state.
 ///
 /// Deliberately only consulted at word-boundary time (space/return), not on
 /// every keystroke: this is a cross-process XPC call to the focused app's
@@ -29,34 +28,12 @@ enum FocusedElementChecker {
     private static var enhancedAccessibilityPIDs: Set<pid_t> = []
     private static let enhancedAccessibilityLock = NSLock()
 
-    /// Delay before each retry beyond the first attempt, in seconds. A
-    /// just-switched-to (or just-launched) app's accessibility server can
-    /// take a beat to catch up -- observed as the first word typed into a
-    /// freshly-focused document not getting corrected at all (the text
-    /// itself types in fine; this check alone is what silently blocks
-    /// `triggerDecision` from ever running for it). A single 50ms retry
-    /// wasn't always enough for a cold-launched native app (e.g. a brand
-    /// new TextEdit window), so this backs off further before giving up --
-    /// still adds nothing to the overwhelmingly common case where the first
-    /// attempt succeeds.
-    private static let retryDelays: [TimeInterval] = [0.05, 0.15]
-
     static func isFocusedElementEditableText(for pid: pid_t) -> Bool {
         enableEnhancedAccessibilityIfNeeded(for: pid)
-        if checkFocusedElementEditableText(attempt: 1) {
-            return true
-        }
-
-        for (index, delay) in retryDelays.enumerated() {
-            Thread.sleep(forTimeInterval: delay)
-            if checkFocusedElementEditableText(attempt: index + 2) {
-                return true
-            }
-        }
-        return false
+        return checkFocusedElementEditableText()
     }
 
-    private static func checkFocusedElementEditableText(attempt: Int) -> Bool {
+    private static func checkFocusedElementEditableText() -> Bool {
         let systemWide = AXUIElementCreateSystemWide()
 
         var focusedElementRef: AnyObject?
@@ -64,33 +41,62 @@ enum FocusedElementChecker {
               let focusedElementRef,
               CFGetTypeID(focusedElementRef) == AXUIElementGetTypeID()
         else {
-            DebugLogger.log("no focused UI element could be retrieved via Accessibility (attempt \(attempt))")
+            DebugLogger.log("no focused UI element could be retrieved via Accessibility")
             return false
         }
         let element = focusedElementRef as! AXUIElement
+
+        // Web-backed editors can desynchronize their DOM/IME state when
+        // changed through Accessibility. Missing a correction is safer than
+        // corrupting composition or whitespace in browsers and Electron apps.
+        if isInsideWebArea(element) {
+            DebugLogger.log("focused element excluded because it is inside AXWebArea")
+            return false
+        }
 
         let role = stringAttribute(element, kAXRoleAttribute as CFString)
         if let role, editableRoles.contains(role) {
             return true
         }
 
-        // Fallback for fields that don't report one of the standard AppKit
-        // roles above (Safari's address bar, System Settings' search field,
-        // and various web/custom text widgets have all been reported to
-        // slip past a role-only check): any element exposing a selected
-        // text range is, by definition, some kind of text-editing widget
+        // Fallback for native fields that don't report one of the standard
+        // AppKit roles above (Safari's address bar and System Settings'
+        // search field can slip past a role-only check): any element exposing
+        // a selected text range is, by definition, some kind of text-editing widget
         // with a cursor/selection, regardless of what it calls its role.
         var rangeRef: AnyObject?
         let hasSelectedTextRange = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success
 
         if !hasSelectedTextRange {
-            // Not touched on the hot path (only runs once or twice per word
+            // Not touched on the hot path (only runs once per word
             // boundary) -- left in to make it possible to diagnose a field
             // that still isn't detected, via Settings' "Export Logs" for
             // the reported role next time this returns false.
-            DebugLogger.log("focused element not recognized as editable text (role: \(role ?? "nil"), attempt \(attempt))")
+            DebugLogger.log("focused element not recognized as editable text (role: \(role ?? "nil"))")
         }
         return hasSelectedTextRange
+    }
+
+    private static func isInsideWebArea(_ element: AXUIElement) -> Bool {
+        var current = element
+
+        while true {
+            if stringAttribute(current, kAXRoleAttribute as CFString) == "AXWebArea" {
+                return true
+            }
+
+            var parentRef: AnyObject?
+            guard AXUIElementCopyAttributeValue(
+                current,
+                kAXParentAttribute as CFString,
+                &parentRef
+            ) == .success,
+            let parentRef,
+            CFGetTypeID(parentRef) == AXUIElementGetTypeID()
+            else { return false }
+
+            current = parentRef as! AXUIElement
+        }
     }
 
     /// Chromium-based apps (Electron, and Chrome itself) don't build their

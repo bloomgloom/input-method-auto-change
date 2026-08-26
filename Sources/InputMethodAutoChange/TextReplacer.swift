@@ -186,8 +186,12 @@ enum TextReplacer {
               )
         else {
             DebugLogger.log("AX replacement verification failed selectedTextStatus=\(result.rawValue) pid=\(elementPID) role=\(role) expectedCursor=\(replacementRange.location + replacement.utf16.count)")
-            DebugLogger.log("AX replacement destructive fallback suppressed pid=\(elementPID) role=\(role)")
-            return true
+            _ = AXUIElementSetAttributeValue(
+                element,
+                kAXSelectedTextRangeAttribute as CFString,
+                selectedRangeValue
+            )
+            return false
         }
         DebugLogger.log("AX replacement verified pid=\(elementPID) role=\(role) finalCursor=\(replacementRange.location + replacement.utf16.count)")
         return true

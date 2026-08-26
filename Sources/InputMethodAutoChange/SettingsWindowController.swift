@@ -125,6 +125,11 @@ final class SettingsWindowController: NSWindowController {
         addExceptionsRows(to: grid)
         addUserDictionaryRows(to: grid)
         addDebugRows(to: grid)
+        addRow(
+            to: grid,
+            label: "Quit App",
+            content: NSButton(title: "Quit", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        )
 
         // Columns only exist once at least one row has been added.
         grid.column(at: 0).xPlacement = .trailing
