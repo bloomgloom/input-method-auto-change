@@ -20,6 +20,7 @@ macOS에서 한/영 전환을 깜빡하고 입력한 단어를 자동으로 고�
 
 ## 요구 사항
 
+- Apple Silicon Mac
 - macOS 14 Sonoma 이상
 - `ABC` 또는 `U.S.` 영문 입력 소스
 - `두벌식` 한국어 입력 소스
@@ -31,7 +32,7 @@ macOS에서 한/영 전환을 깜빡하고 입력한 단어를 자동으로 고�
 2. 압축을 풀고 `InputMethodAutoChange.app`을 `/Applications` 폴더로 옮깁니다.
 3. 앱을 실행합니다.
 
-macOS가 앱 실행을 차단하면 **시스템 설정 → 개인정보 보호 및 보안**에서 **확인 없이 열기**를 선택합니다.
+현재 배포 앱은 Apple Developer 인증서로 서명하거나 공증하지 않은 ad-hoc 서명 앱입니다. macOS가 실행을 차단하면 **시스템 설정 → 개인정보 보호 및 보안**에서 **확인 없이 열기**를 선택합니다.
 
 ### 소스에서 빌드
 
@@ -69,3 +70,7 @@ swift test
 ```
 
 앱은 Swift Package Manager와 macOS 기본 프레임워크만 사용합니다.
+
+## 라이선스
+
+[GNU Affero General Public License v3.0](LICENSE)
